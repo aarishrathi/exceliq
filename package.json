@@ -1,0 +1,39 @@
+{
+  "name": "exceliq",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:migrate": "node lib/db-migrate.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^0.0.48",
+    "@vercel/blob": "^0.23.4",
+    "@vercel/postgres": "^0.8.0",
+    "ai": "^3.3.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.400.0",
+    "next": "14.2.5",
+    "next-auth": "^4.24.7",
+    "react": "^18",
+    "react-dom": "^18",
+    "tailwind-merge": "^2.4.0",
+    "uuid": "^10.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@types/uuid": "^10.0.0",
+    "autoprefixer": "^10.0.1",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.5",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}
