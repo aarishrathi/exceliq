@@ -4,31 +4,47 @@ A smart QC specialist and metadata engine for corporate Excel workbooks. Upload 
 
 ## MVP Scope
 - Manual file upload (`.xlsx` / `.xlsm`)
-- Semantic diff: formula, value, structural, VBA/macro changes
-- AI-generated change summaries + inferred intent
+- Semantic diff: formula, value, structural changes
+- AI-generated change summaries + inferred intent (optional)
 - Anomaly flagging with severity levels
 - Persistent audit log per workbook
 - Team dashboard to review and resolve flags
 
 ## Tech Stack
-- **Frontend**: Next.js 14 (App Router), Tailwind CSS, shadcn/ui
-- **Backend**: Next.js API Routes (serverless)
-- **AI**: Anthropic Claude via Vercel AI SDK
-- **Parsing**: Python microservice (FastAPI) via `/api/parse`
-- **Storage**: Vercel Postgres (audit log) + Vercel Blob (file storage)
-- **Deployment**: Vercel
+- **Frontend**: Next.js 14 (App Router), Tailwind CSS
+- **Backend**: Next.js API Routes
+- **Parsing**: SheetJS (`xlsx`) in Node
+- **AI** (optional): Anthropic Claude via Vercel AI SDK
+- **Storage**: Local `.data/` store by default; Vercel Postgres + Blob when configured
+- **Optional**: Python FastAPI microservice for VBA extraction (`python/`)
 
-## Getting Started
+## Getting Started (local — zero cloud keys)
 
 ```bash
 npm install
-cp .env.example .env.local
-# Fill in your keys
 npm run dev
 ```
 
+Open [http://localhost:3000](http://localhost:3000), enter your name, and upload an `.xlsx` file.
+
+Data is stored under `.data/` (gitignored). No Postgres, Blob, or Anthropic key is required for the core upload → dashboard → diff flow.
+
+Optional: copy `.env.example` to `.env.local` and add `ANTHROPIC_API_KEY` for richer AI summaries on version 2+.
+
+## Production / Vercel mode
+
+Set these in `.env.local` (or Vercel project settings):
+
+```bash
+POSTGRES_URL=...
+BLOB_READ_WRITE_TOKEN=...
+ANTHROPIC_API_KEY=...   # optional
+```
+
+Then visit `/api/init` once (or just upload — schema auto-inits) to create tables.
+
 ## Environment Variables
-See `.env.example` for all required keys.
+See `.env.example` for all keys. Local mode activates automatically when `POSTGRES_URL` is unset.
 
 ## Project Structure
 ```
@@ -38,16 +54,18 @@ exceliq/
 │   ├── dashboard/          # Team dashboard
 │   ├── workbook/[id]/      # Workbook detail + diff viewer
 │   └── api/                # API routes
-│       ├── upload/         # File ingestion + hashing
-│       ├── analyze/        # AI diff + anomaly detection
-│       └── workbooks/      # CRUD for audit log
-├── components/             # UI components
+│       ├── upload/         # File ingestion + hashing + analysis
+│       ├── workbooks/      # CRUD for audit log
+│       ├── files/          # Local file serving
+│       └── init/           # Storage bootstrap
 ├── lib/                    # Core logic
-│   ├── parser.ts           # Excel parsing orchestrator
+│   ├── parser.ts           # Excel parsing (SheetJS)
 │   ├── diff.ts             # Semantic diff engine
-│   ├── ai.ts               # Claude integration
-│   └── db.ts               # Database helpers
-├── python/                 # FastAPI parsing microservice
+│   ├── ai.ts               # Claude + rule-based anomalies
+│   ├── db.ts               # Postgres helpers
+│   ├── local-store.ts      # File-backed local store
+│   └── storage.ts          # Blob / local file storage
+├── python/                 # Optional FastAPI VBA extractor
 │   ├── main.py
 │   ├── parser.py
 │   └── requirements.txt

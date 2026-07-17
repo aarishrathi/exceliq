@@ -49,13 +49,45 @@ Write a concise 3-5 sentence plain-English summary of what changed.
 For any inferred reasons or intent, prefix with "[Inference]". 
 Do not speculate without labeling. Be factual about what changed, and cautious about why.`;
 
-  const { text } = await generateText({
-    model: anthropic(MODEL),
-    prompt,
-    maxTokens: 500,
-  });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return buildRuleBasedSummary(diff, fileName, uploadedBy);
+  }
 
-  return text;
+  try {
+    const { text } = await generateText({
+      model: anthropic(MODEL),
+      prompt,
+      maxTokens: 500,
+    });
+    return text;
+  } catch (err) {
+    console.warn('[ai] generateDiffSummary failed, using rule-based fallback:', err);
+    return buildRuleBasedSummary(diff, fileName, uploadedBy);
+  }
+}
+
+function buildRuleBasedSummary(
+  diff: SemanticDiff,
+  fileName: string,
+  uploadedBy: string
+): string {
+  const formulaChanges = diff.cellChanges.filter(
+    (c) => c.changeType === 'formula_changed'
+  ).length;
+  const valueChanges = diff.cellChanges.filter(
+    (c) => c.changeType === 'value_changed'
+  ).length;
+
+  return [
+    `${fileName} uploaded by ${uploadedBy} has ${diff.totalChanges} change(s).`,
+    `${formulaChanges} formula change(s), ${valueChanges} value change(s), and ${diff.structuralChanges.length} structural change(s).`,
+    diff.structuralChanges.length > 0
+      ? `Structural: ${diff.structuralChanges.map((s) => s.detail).slice(0, 3).join('; ')}.`
+      : null,
+    '[Inference] AI summary unavailable — showing deterministic change counts instead.',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 /**
@@ -127,9 +159,13 @@ export async function detectAnomalies(
     }
   }
 
-  // If there are high-severity flags, ask AI to infer causes
+  // If there are high-severity flags and Anthropic is configured, ask AI to infer causes
   const criticalFlags = flags.filter((f) => f.severity === 'critical');
-  if (criticalFlags.length > 0 && diff.totalChanges > 0) {
+  if (
+    process.env.ANTHROPIC_API_KEY &&
+    criticalFlags.length > 0 &&
+    diff.totalChanges > 0
+  ) {
     const enriched = await enrichFlagsWithAI(criticalFlags, diff, fileName);
     return [...enriched, ...flags.filter((f) => f.severity !== 'critical')];
   }
@@ -161,7 +197,7 @@ Respond as a JSON array with objects: { "id": "...", "aiInferredCause": "[Infere
     });
 
     // Extract JSON from response
-    const jsonMatch = text.match(/\[.*\]/s);
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return flags;
 
     const enrichments: { id: string; aiInferredCause: string }[] = JSON.parse(jsonMatch[0]);

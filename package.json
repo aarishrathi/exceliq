@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "db:migrate": "node lib/db-migrate.js"
+    "db:init": "curl -s http://localhost:3000/api/init"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^0.0.48",

@@ -27,7 +27,10 @@ export interface ParsedWorkbook {
  * Generates a simple hash of an ArrayBuffer for fingerprinting.
  */
 export async function hashBuffer(buffer: ArrayBuffer): Promise<string> {
-  const hashBuf = await crypto.subtle.digest('SHA-256', buffer);
+  const subtle =
+    globalThis.crypto?.subtle ??
+    (await import('crypto')).webcrypto.subtle;
+  const hashBuf = await subtle.digest('SHA-256', buffer);
   const hashArr = Array.from(new Uint8Array(hashBuf));
   return hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
 }

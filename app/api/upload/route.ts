@@ -1,50 +1,74 @@
 /**
  * POST /api/upload
  * Ingests an Excel file, parses it, diffs against previous version,
- * runs AI analysis, stores everything in DB + Blob.
+ * runs AI analysis (when configured), and persists to local store or Postgres.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { put } from '@vercel/blob';
 import { sql } from '@vercel/postgres';
 import { v4 as uuidv4 } from 'uuid';
 import { parseExcelBuffer, hashBuffer } from '@/lib/parser';
 import { computeSemanticDiff } from '@/lib/diff';
 import { generateDiffSummary, detectAnomalies } from '@/lib/ai';
+import { storeWorkbookFile } from '@/lib/storage';
+import {
+  isLocalMode,
+  createWorkbook,
+  touchWorkbook,
+  getLatestVersionNumber,
+  getLatestVersion,
+  createVersion,
+  createFlags,
+} from '@/lib/local-store';
+import { initDb } from '@/lib/db';
 import type { ParsedWorkbook } from '@/lib/parser';
+
+export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
-    const uploadedBy = formData.get('uploadedBy') as string ?? 'Unknown';
-    const workbookName = formData.get('workbookName') as string ?? '';
+    const uploadedBy = (formData.get('uploadedBy') as string) ?? 'Unknown';
+    const workbookName = (formData.get('workbookName') as string) ?? '';
     const existingWorkbookId = formData.get('workbookId') as string | null;
 
     if (!file) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Read file into buffer
     const arrayBuffer = await file.arrayBuffer();
     const fileHash = await hashBuffer(arrayBuffer);
-
-    // Parse workbook
     const parsed: ParsedWorkbook = parseExcelBuffer(arrayBuffer, file.name, fileHash);
 
-    // Store file in Vercel Blob
-    const blobResult = await put(
-      `workbooks/${fileHash}/${file.name}`,
+    const blobUrl = await storeWorkbookFile(
+      fileHash,
+      file.name,
       new Uint8Array(arrayBuffer),
-      { access: 'public', contentType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+      file.type ||
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
 
-    // Resolve or create workbook record
+    if (isLocalMode()) {
+      return handleLocalUpload({
+        file,
+        fileHash,
+        parsed,
+        blobUrl,
+        uploadedBy,
+        workbookName,
+        existingWorkbookId,
+      });
+    }
+
+    // Ensure Postgres schema exists (idempotent)
+    await initDb();
+
     let workbookId = existingWorkbookId;
     let versionNumber = 1;
 
     if (workbookId) {
-      // Fetch latest version for diff
       const { rows: vRows } = await sql`
         SELECT version_number FROM workbook_versions
         WHERE workbook_id = ${workbookId}
@@ -63,7 +87,6 @@ export async function POST(req: NextRequest) {
       `;
     }
 
-    // Get previous parsed snapshot for diff
     let diff = null;
     let aiSummary = 'First version — no previous version to compare against.';
     let anomalies: Awaited<ReturnType<typeof detectAnomalies>> = [];
@@ -75,8 +98,6 @@ export async function POST(req: NextRequest) {
         ORDER BY version_number DESC LIMIT 1
       `;
 
-      // We store the parsed snapshot in the diff column for now (MVP shortcut)
-      // In production: store full parsed JSON in a separate column
       const prevParsed = prevRows[0]?.diff?.parsedSnapshot as ParsedWorkbook | undefined;
 
       if (prevParsed) {
@@ -88,19 +109,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Store version
     const versionId = uuidv4();
+    const diffPayload = JSON.stringify({ ...(diff ?? {}), parsedSnapshot: parsed });
+
     await sql`
       INSERT INTO workbook_versions
         (id, workbook_id, version_number, uploaded_by, file_name, file_hash, blob_url, diff, ai_summary)
       VALUES
         (${versionId}, ${workbookId}, ${versionNumber}, ${uploadedBy},
-         ${file.name}, ${fileHash}, ${blobResult.url},
-         ${JSON.stringify({ ...(diff ?? {}), parsedSnapshot: parsed })},
+         ${file.name}, ${fileHash}, ${blobUrl},
+         ${diffPayload}::jsonb,
          ${aiSummary})
     `;
 
-    // Store anomaly flags
     if (anomalies.length > 0) {
       for (const flag of anomalies) {
         await sql`
@@ -115,14 +136,22 @@ export async function POST(req: NextRequest) {
         `;
       }
 
-      // Recompute health score: penalise per critical/warning flag
       const criticalCount = anomalies.filter((f) => f.severity === 'critical').length;
       const warningCount = anomalies.filter((f) => f.severity === 'warning').length;
       const healthScore = Math.max(0, 100 - criticalCount * 20 - warningCount * 5);
-      await sql`UPDATE workbooks SET health_score = ${healthScore}, open_flag_count = ${anomalies.length} WHERE id = ${workbookId}`;
+      await sql`
+        UPDATE workbooks
+        SET health_score = ${healthScore}, open_flag_count = ${anomalies.length}
+        WHERE id = ${workbookId}
+      `;
     }
 
-    return NextResponse.json({ workbookId, versionId, anomalyCount: anomalies.length });
+    return NextResponse.json({
+      workbookId,
+      versionId,
+      anomalyCount: anomalies.length,
+      mode: 'postgres',
+    });
   } catch (err) {
     console.error('[upload]', err);
     return NextResponse.json(
@@ -130,4 +159,78 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+async function handleLocalUpload(opts: {
+  file: File;
+  fileHash: string;
+  parsed: ParsedWorkbook;
+  blobUrl: string;
+  uploadedBy: string;
+  workbookName: string;
+  existingWorkbookId: string | null;
+}) {
+  const {
+    file,
+    fileHash,
+    parsed,
+    blobUrl,
+    uploadedBy,
+    workbookName,
+    existingWorkbookId,
+  } = opts;
+
+  let workbookId = existingWorkbookId;
+  let versionNumber = 1;
+
+  if (workbookId) {
+    versionNumber = (await getLatestVersionNumber(workbookId)) + 1;
+    await touchWorkbook(workbookId);
+  } else {
+    workbookId = uuidv4();
+    await createWorkbook({
+      id: workbookId,
+      name: workbookName || file.name,
+      createdBy: uploadedBy,
+    });
+  }
+
+  let diff = null;
+  let aiSummary = 'First version — no previous version to compare against.';
+  let anomalies: Awaited<ReturnType<typeof detectAnomalies>> = [];
+
+  if (versionNumber > 1) {
+    const prev = await getLatestVersion(workbookId);
+    const prevParsed = prev?.diff?.parsedSnapshot;
+    if (prevParsed) {
+      diff = computeSemanticDiff(prevParsed, parsed);
+      [aiSummary, anomalies] = await Promise.all([
+        generateDiffSummary(diff, file.name, uploadedBy),
+        detectAnomalies(diff, file.name),
+      ]);
+    }
+  }
+
+  const versionId = uuidv4();
+  await createVersion({
+    id: versionId,
+    workbookId,
+    versionNumber,
+    uploadedBy,
+    uploadedAt: new Date().toISOString(),
+    fileName: file.name,
+    fileHash,
+    blobUrl,
+    diff: { ...(diff ?? {}), parsedSnapshot: parsed },
+    aiSummary,
+  });
+
+  await createFlags(workbookId, versionId, anomalies);
+
+  return NextResponse.json({
+    workbookId,
+    versionId,
+    anomalyCount: anomalies.length,
+    mode: 'local',
+  });
 }
